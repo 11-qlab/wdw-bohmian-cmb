@@ -1,22 +1,4 @@
-"""
-Complex-mode WDW solver + real Bogoliubov extraction.
-
-Mode equation (single mode, HH-regular IC):
-    c'' + [a^4 V_nn - a^2 + lam/a^2] c = 0
-       = c'' + omega^2(a) c = 0
-
-We use the COMPLEX mode that corresponds to the Euclidean
-no-boundary regularity:
-
-    c(a_min)  = a_min^{1/2 + i*nu}
-    c'(a_min) = (1/2 + i*nu)/a_min * c(a_min)
-    nu = sqrt(max(lam - 1/4, 0))
-
-For lam < 1/4, nu = 0 and the IC is real. We break this by
-adding a small imaginary part representing the HH phase:
-
-    c(a_min) = a_min^{p+} * exp(i * pi/4)   (a "Gaussian phase")
-"""
+"""Complex-mode WDW solver + Bogoliubov extraction (with phase param)."""
 from __future__ import annotations
 import numpy as np
 from scipy.integrate import solve_ivp
@@ -32,15 +14,22 @@ def solve_mode(n, phi_max, m, a_min=0.05, a_max=8.0, n_a=3000,
                phase=np.pi / 4):
     lam = (n * np.pi / (2.0 * phi_max)) ** 2
     Vnn = v_nn(n, phi_max, m)
-
     nu = np.sqrt(max(lam - 0.25, 0.0))
     p = 0.5 + 1j * nu
-    if abs(nu) < 1e-14:
-        # lam <= 1/4: real exponent branch, add HH phase manually
-        c0 = a_min ** 0.5 * np.exp(1j * phase)
+
+    # FIX: choose an IC with nonzero Wronskian, representing an
+    # actual positive-frequency WKB mode at a_min.
+    # c(a_min) = e^{-i phase} / sqrt(2 w_min)
+    # c'(a_min) = (-i w_min) c(a_min)
+    w2_min = a_min**4 * Vnn - a_min**2 + lam / a_min**2
+    if w2_min > 0:
+        w_min = np.sqrt(w2_min)
+        c0 = np.exp(-1j * phase) / np.sqrt(2 * w_min)
+        dc0 = -1j * w_min * c0
     else:
-        c0 = a_min ** p
-    dc0 = (p / a_min) * c0
+        # forbidden region: fall back to Euclidean power law
+        c0 = a_min ** p * np.exp(-1j * phase)
+        dc0 = (p / a_min) * c0
 
     def rhs(a, y):
         c, dc = y
@@ -57,11 +46,18 @@ def solve_mode(n, phi_max, m, a_min=0.05, a_max=8.0, n_a=3000,
 
 def extract_bogoliubov(a, c, dc, lam, Vnn):
     """
-    |β/α|² = |c - i c'/ω|² / |c + i c'/ω|²
+    Returns (|beta/alpha|^2, |alpha|^2 - |beta|^2).
 
-    This is only meaningful when c is COMPLEX. Averaged over the
-    last 30% of the evolution.
+    |beta/alpha|^2 = |c - i c'/w|^2 / |c + i c'/w|^2
+    The unitarity check value |alpha|^2 - |beta|^2 is derived
+    from the conserved Wronskian.
     """
+    # Unitarity from Wronskian:
+    # W = i (|beta|^2 - |alpha|^2)  in the sign convention used
+    # so |alpha|^2 - |beta|^2 = -W / i = i W
+    W = c.conj() * dc - c * dc.conj()
+    unitary = np.real(1j * W)  # should be ~ const, ideally = 1
+
     i0 = int(0.7 * len(a))
     vals = []
     for i in range(i0, len(a)):
@@ -70,29 +66,24 @@ def extract_bogoliubov(a, c, dc, lam, Vnn):
         if w2 <= 0:
             continue
         w = np.sqrt(w2)
-        num = abs(c[i] + 1j * dc[i] / w) ** 2
-        den = abs(c[i] - 1j * dc[i] / w) ** 2
+        num = abs(c[i] - 1j * dc[i] / w) ** 2
+        den = abs(c[i] + 1j * dc[i] / w) ** 2
         if den > 1e-300:
             vals.append(num / den)
-    if not vals:
-        return np.nan
-    return float(np.median(vals))
+    bsq = float(np.median(vals)) if vals else np.nan
+    return bsq, float(np.median(unitary))
 
 
 if __name__ == "__main__":
-    print(f"{'n':>3}  {'m':>5}  {'phi_max':>8}  {'V_nn':>8}  "
-          f"{'lam':>8}  {'|β/α|²':>12}")
-    print("-" * 58)
+    print(f"{'n':>3}  {'m':>5}  {'phi_max':>8}  {'|β/α|²':>12}  {'unitarity':>12}")
+    print("-" * 55)
     for n in (1, 2, 3, 4):
         for m in (0.5, 1.0, 2.0, 4.0):
             for phi_max in (3.0, 5.0):
                 try:
                     a, c, dc, lam, Vnn = solve_mode(n, phi_max, m)
-                    # Check that c is genuinely complex
-                    imag_frac = np.abs(c.imag).max() / np.abs(c).max()
-                    bsq = extract_bogoliubov(a, c, dc, lam, Vnn)
+                    bsq, uni = extract_bogoliubov(a, c, dc, lam, Vnn)
                     print(f"{n:>3}  {m:>5.2f}  {phi_max:>8.2f}  "
-                          f"{Vnn:>8.3f}  {lam:>8.4f}  {bsq:>12.4e}"
-                          f"   [imag_frac={imag_frac:.3f}]")
+                          f"{bsq:>12.4e}  {uni:>12.4e}")
                 except Exception as e:
                     print(f"ERR n={n} m={m} phi_max={phi_max}: {e}")
