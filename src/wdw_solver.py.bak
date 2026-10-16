@@ -1,0 +1,87 @@
+"""
+Wheeler-DeWitt minisuperspace solver via two-point BVP.
+
+Equation (hbar = 1):
+    Ψ'' - (1/a²) Ψ_φφ - a² Ψ + a⁴ V(φ) Ψ = 0,   V = ½ m² φ²
+
+State vector: y = [Ψ, Π], Π = ∂_a Ψ.
+"""
+from __future__ import annotations
+import numpy as np
+from scipy.integrate import solve_bvp
+from scipy.sparse import diags
+
+
+def phi_laplacian(n_phi: int, phi_max: float) -> np.ndarray:
+    dphi = 2.0 * phi_max / (n_phi - 1)
+    off = np.ones(n_phi - 1) / dphi**2
+    main = -2.0 * np.ones(n_phi) / dphi**2
+    L = diags([off, main, off], [-1, 0, 1], shape=(n_phi, n_phi)).toarray()
+    L[0, :] = 0.0
+    L[-1, :] = 0.0
+    return L
+
+
+def dirichlet_eigenvalues(n_phi, phi_max):
+    """λ_n for -d²/dφ² on [-φ_max, φ_max] with Dirichlet BCs."""
+    n = np.arange(1, n_phi + 1)
+    return (n * np.pi / (2.0 * phi_max)) ** 2
+
+
+def regular_branch_p(lam):
+    """Largest real branch p_+ of p(p-1) = λ."""
+    disc = 1.0 - 4.0 * lam
+    return 0.5 * (1.0 + np.sqrt(np.maximum(disc, 0.0)))
+
+
+def solve_wdw_bvp(
+    a_min: float = 0.2,
+    a_max: float = 5.0,
+    n_a: int = 200,
+    phi_max: float = 3.0,
+    n_phi: int = 96,
+    m: float = 1.0,
+    hbar: float = 1.0,
+    sigma_phi: float = 0.5,
+):
+    phi = np.linspace(-phi_max, phi_max, n_phi)
+    L_phi = phi_laplacian(n_phi, phi_max)
+    V = 0.5 * m**2 * phi**2
+
+    # initial guess on a coarse a-grid
+    a0 = np.linspace(a_min, a_max, 40)
+    G = np.exp(-0.5 * (phi / sigma_phi) ** 2)
+    G[0] = G[-1] = 0.0
+    Psi0 = np.tile(G, (a0.size, 1)).T
+    Pi0 = np.zeros_like(Psi0)
+    y0 = np.vstack([Psi0, Pi0])
+
+    def rhs(a, y):
+        Psi, Pi = y[:n_phi], y[n_phi:]
+        d2Psi = L_phi @ Psi
+        dPi = d2Psi / a**2 + a**2 * Psi - a**4 * V[:, None] * Psi
+        return np.vstack([Pi, dPi])
+
+    lam = dirichlet_eigenvalues(n_phi, phi_max)
+    p_plus = regular_branch_p(lam)
+
+    def bc(ya, yb):
+        # at a_min: regularity per mode (diagonal approximation)
+        # ∂_a Ψ ≈ (p_+/a_min) Ψ
+        bc_a = ya[n_phi:] - (p_plus[:, None] / a_min) * ya[:n_phi]
+        # at a_max: outgoing decaying WKB  ∂_a Ψ = -a_max Ψ
+        bc_b = yb[n_phi:] + a_max * yb[:n_phi]
+        bc_a[0, :] = ya[:n_phi][0, :]
+        bc_a[-1, :] = ya[:n_phi][-1, :]
+        bc_b[0, :] = 0.0
+        bc_b[-1, :] = 0.0
+        return np.concatenate([bc_a.ravel(), bc_b.ravel()])
+
+    sol = solve_bvp(rhs, bc, a0, y0, tol=1e-6, max_nodes=1000)
+    if not sol.success:
+        raise RuntimeError(f"solve_bvp failed: {sol.message}")
+
+    a = np.linspace(a_min, a_max, n_a)
+    y = sol.sol(a)
+    Psi = y[:n_phi].T
+    return a, phi, Psi
